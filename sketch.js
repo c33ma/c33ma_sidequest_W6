@@ -85,34 +85,31 @@ let pendingDeath = false;
 let deathStarted = false;
 let deathFrameTimer = 0;
 
+// sound
+let jumpSound;
+let collectSound;
+let hurtSound;
+
+// particles + shake
+let particles = [];
+let shakeTimer = 0;
+let shakeStrength = 0;
+
 // --- TILE MAP ---
-/*
-  Tile key:
-    g = groundTile.png       (surface ground)
-    d = groundTileDeep.png   (deep ground, below surface)
-    L = platformLC.png       (platform left cap)  -> boars turn
-    R = platformRC.png       (platform right cap) -> boars turn
-    [ = wallL.png            (wall left side)     -> boars turn
-    ] = wallR.png            (wall right side)    -> boars turn
-    b = boar spawn
-    x = leaf collectible (boars pass through)
-    f = fire hazard (player takes damage, boars turn around if they "see" it ahead)
-      = empty (no sprite)
-*/
 let level = [
-  "                    g   g   b  x        ", // row  0
-  "                b x         LggR        ", // row  1
-  "      x   f     LggR                    ", // row  2
-  "     LR   LgR          LR               ", // row  3
-  "   fx  b        x   b                   ", // row  4
-  "   LgggR   x   LR   LgR x   b  xf       ", // row  5
-  "         LgR  b x       g   LggggR      ", // row  6
-  " fx           LgR                    fx ", // row  7
-  " LgR      b                         LggR", // row  8
-  "         LgR        f x    LR  LgR  [dd]", // row  9
-  "   x     [d]      x LggR   x    ff  [dd]", // row 10
-  "LgggRffLggggggRfffLgggg]fffgfLgggggggggg", // row 11
-  "dddddddddddddddddddddddddddddddddddddddd", // row 12
+  "                    g   g   b  x        ",
+  "                b x         LggR        ",
+  "      x   f     LggR                    ",
+  "     LR   LgR          LR               ",
+  "   fx  b        x   b                   ",
+  "   LgggR   x   LR   LgR x   b  xf       ",
+  "         LgR  b x       g   LggggR      ",
+  " fx           LgR                    fx ",
+  " LgR      b                         LggR",
+  "         LgR        f x    LR  LgR  [dd]",
+  "   x     [d]      x LggR   x    ff  [dd]",
+  "LgggRffLggggggRfffLgggg]fffgfLgggggggggg",
+  "dddddddddddddddddddddddddddddddddddddddd",
 ];
 
 // --- LEVEL CONSTANTS ---
@@ -130,7 +127,7 @@ const VIEWTILE_H = 8;
 const VIEWW = TILE_W * VIEWTILE_W;
 const VIEWH = TILE_H * VIEWTILE_H;
 
-const WIN_SCORE = 15; // total leaves in level
+const WIN_SCORE = 15;
 
 const PLAYER_START_Y = LEVELH - TILE_H * 4;
 
@@ -155,13 +152,13 @@ const BOAR_KNOCK_Y = 1.6;
 const BOAR_FLASH_FRAMES = 5;
 
 // boar turning tuning
-const BOAR_TURN_COOLDOWN = 12; // frames
+const BOAR_TURN_COOLDOWN = 12;
 
-// boar probe positioning (relative to boar)
-const PROBE_FORWARD = 10; // how far ahead (smaller = closer to boar)
-const PROBE_FRONT_Y = 10; // how far down from boar center to sample "ahead at feet"
-const PROBE_HEAD_Y = 0; // how far UP from boar center to sample "ahead above"
-const PROBE_SIZE = 4; // for debugging purposes
+// boar probe positioning
+const PROBE_FORWARD = 10;
+const PROBE_FRONT_Y = 10;
+const PROBE_HEAD_Y = 0;
+const PROBE_SIZE = 4;
 
 // HUD constants
 const FONT_COLS = 19;
@@ -178,7 +175,7 @@ const FONT_CHARS =
 // gravity
 const GRAVITY = 10;
 
-// --- TILE HELPERS (only what we actually need) ---
+// --- TILE HELPERS ---
 function tileAt(col, row) {
   if (row < 0 || row >= level.length) return " ";
   if (col < 0 || col >= level[0].length) return " ";
@@ -209,6 +206,10 @@ function preload() {
   wallRImg = loadImage("assets/wallR.png");
 
   fontImg = loadImage("assets/bitmapFont.png");
+
+  jumpSound = loadSound("assets/jump.mp3");
+  collectSound = loadSound("assets/collect.mp3");
+  hurtSound = loadSound("assets/hurt.mp3");
 }
 
 function setup() {
@@ -220,17 +221,14 @@ function setup() {
 
   allSprites.pixelPerfect = true;
 
-  // Manual physics stepping for stable pixel rendering
   world.autoStep = false;
 
-  // HUD buffer
   hudGfx = createGraphics(VIEWW, VIEWH);
   hudGfx.noSmooth();
   hudGfx.pixelDensity(1);
 
   makeWorld();
 
-  // Leaves should be overlap-only (boars pass through, player collects)
   for (const s of leaf) s.removeColliders();
   leafSpawns = [];
   for (const s of leaf) {
@@ -238,7 +236,6 @@ function setup() {
     leafSpawns.push({ s, x: s.x, y: s.y });
   }
 
-  // store boar spawns for restart
   boarSpawns = [];
   for (const e of boar) boarSpawns.push({ x: e.x, y: e.y, dir: e.dir });
 }
@@ -246,10 +243,7 @@ function setup() {
 function draw() {
   background(69, 61, 79);
 
-  // 1) decide boar vel/turns using probes
   updateBoars();
-
-  // 2) then let physics apply vel.x / gravity
   world.step();
 
   // --- CAMERA ---
@@ -262,10 +256,16 @@ function draw() {
   camera.x = Math.round(lerp(camera.x || targetX, targetX, 0.1));
   camera.y = Math.round(lerp(camera.y || targetY, targetY, 0.1));
 
+  if (shakeTimer > 0) {
+    camera.x += random(-shakeStrength, shakeStrength);
+    camera.y += random(-shakeStrength, shakeStrength);
+    shakeTimer--;
+    shakeStrength *= 0.9;
+  }
+
   // --- PLAYER GROUNDED CHECK ---
   const grounded = isPlayerGrounded();
 
-  // --- PLAYER INPUT (disabled during knockback / death) ---
   // ATTACK
   if (!dead && !won && knockTimer === 0 && !pendingDeath && grounded && !attacking && kb.presses("space")) {
     attacking = true;
@@ -280,6 +280,8 @@ function draw() {
   // JUMP
   if (!dead && !won && knockTimer === 0 && !pendingDeath && grounded && kb.presses("up")) {
     player.vel.y = -1 * PLAYER_JUMP;
+    playSfx(jumpSound, 0.45);
+    spawnDust(player.x, player.y + player.h / 2 + 5);
   }
 
   // --- PLAYER STATE / ANIMATION ---
@@ -326,10 +328,9 @@ function draw() {
     }
   }
 
-  // keep player in world bounds
   player.x = constrain(player.x, FRAME_W / 2, LEVELW - FRAME_W / 2);
 
-  // --- PARALLAX BACKGROUNDS (screen space) ---
+  // --- PARALLAX BACKGROUNDS ---
   camera.off();
   imageMode(CORNER);
   drawingContext.imageSmoothingEnabled = false;
@@ -346,7 +347,7 @@ function draw() {
 
   camera.on();
 
-  // --- FALL RESET (alive only) ---
+  // --- FALL RESET ---
   if (!dead && player.y > LEVELH + TILE_H * 3) {
     player.x = FRAME_W;
     player.y = PLAYER_START_Y;
@@ -358,14 +359,13 @@ function draw() {
   if (invulnTimer > 0) invulnTimer--;
   if (knockTimer > 0) knockTimer--;
 
-  // --- ENTER DEAD (only once, after landing) ---
+  // --- ENTER DEAD ---
   if (!dead && pendingDeath && knockTimer === 0 && grounded) {
     dead = true;
     pendingDeath = false;
     deathStarted = false;
   }
 
-  // start death animation once
   if (dead && !deathStarted) {
     deathStarted = true;
 
@@ -379,7 +379,6 @@ function draw() {
     deathFrameTimer = 0;
   }
 
-  // advance death frames manually (non-looping)
   if (dead) {
     const frames = playerAnis.death.frames;
     const delayFrames = playerAnis.death.frameDelay;
@@ -390,7 +389,7 @@ function draw() {
     player.ani.frame = Math.min(frames - 1, f);
   }
 
-  // --- RENDER PIXEL SNAP (render-only, restores after draw) ---
+  // --- RENDER PIXEL SNAP ---
   const px = player.x,
     py = player.y;
   const sx = sensor.x,
@@ -401,7 +400,6 @@ function draw() {
   sensor.x = Math.round(sensor.x);
   sensor.y = Math.round(sensor.y);
 
-  // hurt blink
   if (!dead && invulnTimer > 0) {
     player.tint = Math.floor(invulnTimer / 4) % 2 === 0 ? "#ff5050" : "#ffffff";
   } else {
@@ -409,6 +407,7 @@ function draw() {
   }
 
   allSprites.draw();
+  drawParticles();
 
   player.x = px;
   player.y = py;
@@ -429,11 +428,9 @@ function draw() {
   image(hudGfx, 0, 0);
   camera.on();
 
-  // display a death or win overlay if those events happen
   if (dead) drawDeathOverlay();
   if (won) drawWinOverlay();
 
-  // accept R to restart the game if player wins or dies
   if ((dead || won) && kb.presses("r")) restartGame();
 }
 
@@ -442,6 +439,85 @@ function applyIntegerScale() {
   const scale = Math.max(1, Math.floor(Math.min(window.innerWidth / VIEWW, window.innerHeight / VIEWH)));
   c.style.width = VIEWW * scale + "px";
   c.style.height = VIEWH * scale + "px";
+}
+
+// --- SOUND HELPERS ---
+function playSfx(sound, volume = 0.5) {
+  if (!sound) return;
+  if (sound.isLoaded && !sound.isLoaded()) return;
+  sound.setVolume(volume);
+  if (sound.isPlaying()) sound.stop();
+  sound.play();
+}
+
+// --- PARTICLES ---
+function spawnDust(x, y) {
+  for (let i = 0; i < 6; i++) {
+    particles.push({
+      x: x + random(-6, 6),
+      y: y + random(-2, 2),
+      vx: random(-0.6, 0.6),
+      vy: random(-0.8, -0.2),
+      size: random(3, 5),
+      life: 18,
+      color: [220, 205, 170],
+    });
+  }
+}
+
+function spawnSparkles(x, y) {
+  for (let i = 0; i < 10; i++) {
+    particles.push({
+      x,
+      y,
+      vx: random(-1.2, 1.2),
+      vy: random(-1.8, -0.4),
+      size: random(2, 4),
+      life: 24,
+      color: random() < 0.5 ? [255, 240, 120] : [255, 255, 255],
+    });
+  }
+}
+
+function spawnHitParticles(x, y) {
+  for (let i = 0; i < 8; i++) {
+    particles.push({
+      x,
+      y,
+      vx: random(-1.5, 1.5),
+      vy: random(-1.5, 0.2),
+      size: random(3, 5),
+      life: 16,
+      color: random() < 0.5 ? [255, 90, 90] : [255, 170, 90],
+    });
+  }
+}
+
+function drawParticles() {
+  noStroke();
+  rectMode(CENTER);
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    let p = particles[i];
+
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.04;
+    p.life--;
+
+    const alpha = map(p.life, 0, 24, 0, 255, true);
+    fill(p.color[0], p.color[1], p.color[2], alpha);
+    rect(Math.round(p.x), Math.round(p.y), Math.round(p.size), Math.round(p.size));
+
+    if (p.life <= 0) {
+      particles.splice(i, 1);
+    }
+  }
+}
+
+function startShake(strength = 3, duration = 10) {
+  shakeStrength = strength;
+  shakeTimer = duration;
 }
 
 // --- BITMAP FONT HUD ---
@@ -498,7 +574,6 @@ function redrawHUD() {
   }
 }
 
-// is player grounded
 function isPlayerGrounded() {
   return (
     sensor.overlapping(ground) ||
@@ -511,15 +586,17 @@ function isPlayerGrounded() {
 // --- LEAF COLLECT ---
 function rescueLeaf(player, leaf) {
   if (!leaf.active) return;
+
+  playSfx(collectSound, 0.55);
+  spawnSparkles(leaf.x, leaf.y);
+
   leaf.active = false;
   leaf.visible = false;
   leaf.removeColliders();
   score++;
 
-  // win condition
   if (score >= WIN_SCORE) {
     won = true;
-    // optional: freeze player immediately
     player.vel.x = 0;
     player.vel.y = 0;
   }
@@ -528,6 +605,10 @@ function rescueLeaf(player, leaf) {
 // --- DAMAGE FROM FIRE ---
 function takeDamageFromFire(player, fire) {
   if (invulnTimer > 0 || dead) return;
+
+  playSfx(hurtSound, 0.5);
+  spawnHitParticles(player.x, player.y);
+  startShake(3, 10);
 
   health = max(0, health - 1);
   if (health <= 0) pendingDeath = true;
@@ -547,6 +628,10 @@ function takeDamageFromFire(player, fire) {
 function playerHitByBoar(player, e) {
   if (e.dying || e.dead) return;
   if (invulnTimer > 0 || dead) return;
+
+  playSfx(hurtSound, 0.5);
+  spawnHitParticles(player.x, player.y);
+  startShake(3, 10);
 
   health = max(0, health - 1);
   if (health <= 0) pendingDeath = true;
@@ -586,15 +671,13 @@ function tryHitBoar() {
   }
 }
 
-// --- BOAR TURN HELPER ---
 function turnBoar(e, newDir) {
-  if (e.turnTimer > 0) return; // cooldown prevents jitter / double-turns
+  if (e.turnTimer > 0) return;
   e.dir = newDir;
   e.turnTimer = BOAR_TURN_COOLDOWN;
 
-  // small nudge so it separates from the thing it hit
   e.x += e.dir * 6;
-  e.vel.x = 0; // kill sideways bounce/jitter impulse
+  e.vel.x = 0;
 }
 
 function groundAheadForDir(e, dir) {
@@ -613,20 +696,16 @@ function groundAheadForDir(e, dir) {
 }
 
 function fixSpawnEdgeCase(e) {
-  // requires probes already attached
-  // choose a direction that has ground ahead (if possible)
   const leftOk = groundAheadForDir(e, -1);
   const rightOk = groundAheadForDir(e, 1);
 
   if (leftOk && !rightOk) e.dir = -1;
   else if (rightOk && !leftOk) e.dir = 1;
-  // else keep whatever it already had (both ok or both bad)
 
-  // IMPORTANT: after choosing dir, re-place probes and "freeze" for this frame
   updateBoarProbes(e);
-  e.vel.x = 0; // don't let it take a step this frame
-  e.turnTimer = 0; // allow turning immediately if your danger logic wants to
-  e.wasDanger = false; // ensure rising-edge logic can trigger
+  e.vel.x = 0;
+  e.turnTimer = 0;
+  e.wasDanger = false;
 }
 
 function hookBoarSolids() {
@@ -676,7 +755,6 @@ function drawWinOverlay() {
 
   push();
   noStroke();
-  // slightly lighter overlay than death
   fill(0, 120);
   rect(0, 0, VIEWW, VIEWH);
   pop();
@@ -690,7 +768,6 @@ function drawWinOverlay() {
   const y1 = Math.round(VIEWH / 2 - 18);
   const y2 = Math.round(VIEWH / 2 + 2);
 
-  // colourful headline + white prompt
   drawOutlinedTextToGfx(window, msg1, x1, y1, "#00e5ff");
   drawOutlinedTextToGfx(window, msg2, x2, y2, "#ffffff");
 
@@ -716,7 +793,6 @@ function drawDeathOverlay() {
   const y1 = Math.round(VIEWH / 2 - 18);
   const y2 = Math.round(VIEWH / 2 + 2);
 
-  // draw to screen (window) using same outlined font
   drawOutlinedTextToGfx(window, msg1, x1, y1, "#ffffff");
   drawOutlinedTextToGfx(window, msg2, x2, y2, "#ffffff");
 
@@ -747,12 +823,10 @@ function attachBoarProbes(e) {
   e.groundProbe.collider = "none";
   e.groundProbe.sensor = true;
 
-  // keep them on/off consistently
   e.footProbe.visible = false;
   e.frontProbe.visible = false;
   e.groundProbe.visible = false;
 
-  // make sure probes always render on top of tiles
   e.footProbe.layer = 999;
   e.frontProbe.layer = 999;
   e.groundProbe.layer = 999;
@@ -760,11 +834,7 @@ function attachBoarProbes(e) {
 
 function updateBoarProbes(e) {
   const forwardX = e.x + e.dir * PROBE_FORWARD;
-
-  // "front" probe: ahead + lower (near feet)
   placeProbe(e.frontProbe, forwardX, e.y + PROBE_FRONT_Y);
-
-  // "foot probe" (your "above" probe): ahead + higher
   placeProbe(e.footProbe, forwardX, e.y - PROBE_HEAD_Y);
 }
 
@@ -784,7 +854,6 @@ function frontProbeHitsWall(e) {
 }
 
 function shouldTurnNow(e, dangerNow) {
-  // only turn on the rising edge: false -> true
   const risingEdge = dangerNow && !e.wasDanger;
   e.wasDanger = dangerNow;
   return risingEdge;
@@ -795,13 +864,7 @@ function boarGrounded(e) {
   return p.overlapping(ground) || p.overlapping(groundDeep) || p.overlapping(platformsL) || p.overlapping(platformsR);
 }
 
-// --- BOAR AI (simple + reliable) ---
-// Rules:
-// 1) If boar collides with L/R/[ /], it turns (handled by collides callbacks)
-// 2) If boar "sees" fire ahead (tile probe), it turns
-// 3) Leaves do not affect boars (no colliders; no boar/leaf collisions)
 function updateBoars() {
-  // freeze boars if player wins
   if (won) {
     for (const e of boar) e.vel.x = 0;
     return;
@@ -814,22 +877,18 @@ function updateBoars() {
     if (e.spawnFreeze > 0) {
       e.spawnFreeze--;
       e.vel.x = 0;
-      e.ani = "run"; // or "throwPose" if you want a “wake up” pose
+      e.ani = "run";
       continue;
     }
 
-    // timers
     if (e.flashTimer > 0) e.flashTimer--;
     if (e.knockTimer > 0) e.knockTimer--;
     if (e.turnTimer > 0) e.turnTimer--;
 
-    // tint flash when hit
     e.tint = e.flashTimer > 0 ? "#ff5050" : "#ffffff";
 
-    // determine if the boar is on the ground
     const grounded = boarGrounded(e);
 
-    // dying behavior (wait until grounded to start death)
     if (!e.dead && e.dying && grounded) {
       e.dead = true;
       e.deathStarted = false;
@@ -842,7 +901,6 @@ function updateBoars() {
       continue;
     }
 
-    // start death once, then freeze + animate + remove
     if (e.dead && !e.deathStarted) {
       e.deathStarted = true;
 
@@ -892,48 +950,37 @@ function updateBoars() {
       continue;
     }
 
-    // knockback overrides patrol
     if (e.knockTimer > 0) {
       e.ani = "throwPose";
       e.ani.frame = 0;
       continue;
     }
 
-    // if not grounded, don’t patrol
     if (!grounded) {
       e.ani = "throwPose";
       e.ani.frame = 0;
       continue;
     }
 
-    // default direction if missing
     if (e.dir !== 1 && e.dir !== -1) e.dir = random([-1, 1]);
 
-    // world bounds safety (optional, but prevents escaping if a cap is missing)
     if (e.x < e.w / 2) turnBoar(e, 1);
     if (e.x > LEVELW - e.w / 2) turnBoar(e, -1);
 
-    // --- PROBE-BASED TURNING RULES ---
-    // 1) turn if front probe is over "space" (no ground ahead)
     const noGroundAhead = !frontProbeHasGroundAhead(e);
-
-    // 2) turn if front probe hits leaf or fire
     const frontHitsLeaf = e.frontProbe.overlapping(leaf);
     const frontHitsFire = e.frontProbe.overlapping(fire);
     const frontHitsWall = frontProbeHitsWall(e);
-
-    // 3) extra: turn if the "above" probe sees fire (early warning)
     const headSeesFire = e.footProbe.overlapping(fire);
 
     const dangerNow = noGroundAhead || frontHitsLeaf || frontHitsFire || frontHitsWall || headSeesFire;
 
     if (e.turnTimer === 0 && shouldTurnNow(e, dangerNow)) {
-      turnBoar(e, -e.dir); // already nudges + vel.x=0
-      updateBoarProbes(e); // probes match new direction immediately
-      continue; // skip patrol velocity this frame
+      turnBoar(e, -e.dir);
+      updateBoarProbes(e);
+      continue;
     }
 
-    // patrol
     e.vel.x = e.dir * BOAR_SPEED;
     e.mirror.x = e.dir === -1;
     e.ani = "run";
@@ -956,6 +1003,10 @@ function restartGame() {
   attacking = false;
   attackFrameCounter = 0;
 
+  particles = [];
+  shakeTimer = 0;
+  shakeStrength = 0;
+
   player.x = FRAME_W;
   player.y = PLAYER_START_Y;
   player.vel.x = 0;
@@ -972,17 +1023,15 @@ function restartGame() {
   camera.x = undefined;
   camera.y = undefined;
 
-  // respawn leaves
   for (const item of leafSpawns) {
     const s = item.s;
     s.x = item.x;
     s.y = item.y;
     s.active = true;
     s.visible = true;
-    s.removeColliders(); // keep overlap-only
+    s.removeColliders();
   }
 
-  // respawn boars (simple rebuild)
   for (const e of boar) {
     e.footProbe?.remove();
     e.frontProbe?.remove();
@@ -1018,15 +1067,13 @@ function restartGame() {
 
     attachBoarProbes(e);
 
-    // if you ever decide to store dir in boarSpawns later, use that here.
-    // for now: random, then fix
     e.dir = random([-1, 1]);
     boar.add(e);
     fixSpawnEdgeCase(e);
 
-    e.spawnFreeze = 1; // freeze AI movement for 1 frame
+    e.spawnFreeze = 1;
     updateBoarProbes(e);
-    updateGroundProbe(e); // if you added this helper
+    updateGroundProbe(e);
     e.vel.x = 0;
 
     e.wasDanger = false;
@@ -1048,7 +1095,6 @@ function restartGame() {
     e.ani = "run";
   }
 
-  // re-hook collisions / rules for newly created boar group
   hookBoarSolids();
   player.overlaps(boar, playerHitByBoar);
 
@@ -1058,7 +1104,6 @@ function restartGame() {
 function makeWorld() {
   world.gravity.y = GRAVITY;
 
-  // --- ENEMIES (boar spawned from 'b') ---
   boar = new Group();
   boar.spriteSheet = boarImg;
   boar.anis.w = FRAME_W;
@@ -1068,7 +1113,6 @@ function makeWorld() {
   boar.physics = "dynamic";
   boar.tile = "b";
 
-  // --- INTERACTIVES ---
   leaf = new Group();
   leaf.physics = "static";
   leaf.spriteSheet = leafImg;
@@ -1087,9 +1131,8 @@ function makeWorld() {
   fire.h = 16;
   fire.tile = "f";
 
-  boar.overlaps(fire, boarDiesInFire); // make sure boars die in the fire
+  boar.overlaps(fire, boarDiesInFire);
 
-  // --- LEVEL TILES ---
   ground = new Group();
   ground.physics = "static";
   ground.img = groundTileImg;
@@ -1120,10 +1163,8 @@ function makeWorld() {
   wallsR.img = wallRImg;
   wallsR.tile = "]";
 
-  // build world from tilemap
   new Tiles(level, 0, 0, TILE_W, TILE_H);
 
-  // --- PLAYER ---
   player = new Sprite(FRAME_W, PLAYER_START_Y, FRAME_W, FRAME_H);
   player.spriteSheet = playerImg;
   player.rotationLock = true;
@@ -1139,12 +1180,10 @@ function makeWorld() {
   player.friction = 0;
   player.bounciness = 0;
 
-  // player interactions
   player.overlaps(fire, takeDamageFromFire);
   player.overlaps(leaf, rescueLeaf);
   player.collides(boar, playerHitByBoar);
 
-  // --- GROUND SENSOR (query-only) ---
   sensor = new Sprite();
   sensor.x = player.x;
   sensor.y = player.y + player.h / 2;
@@ -1157,13 +1196,11 @@ function makeWorld() {
   const sensorJoint = new GlueJoint(player, sensor);
   sensorJoint.visible = false;
 
-  // make fire overlap-only (hazard, not solid)
   for (const s of fire) {
     s.collider = "static";
-    s.sensor = true; // if supported by your p5play build
+    s.sensor = true;
   }
 
-  // --- BOAR SETUP ---
   for (const e of boar) {
     e.physics = "dynamic";
     e.rotationLock = true;
@@ -1179,7 +1216,6 @@ function makeWorld() {
 
     attachBoarProbes(e);
 
-    // choose a safe direction BEFORE the first frame of movement
     e.dir = random([-1, 1]);
     fixSpawnEdgeCase(e);
 
@@ -1202,10 +1238,8 @@ function makeWorld() {
     e.ani = "run";
   }
 
-  // attach turning rules (L/R/[ ])
   hookBoarSolids();
 
-  // --- BACKGROUND PARALLAX ---
   bgLayers = [
     { img: bgFarImg, speed: 0.2 },
     { img: bgMidImg, speed: 0.4 },
